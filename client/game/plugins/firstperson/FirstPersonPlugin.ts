@@ -1,6 +1,7 @@
 import type { Camera } from "../../Camera";
 import type { InputKeyHandler, InputManager, InputMouseHandler } from "../../InputManager";
 import type { CameraFollowContext, CameraInputContext, ClientPlugin } from "../ClientPluginManager";
+import { RS_TO_RADIANS } from "../../../rs/MathConstants";
 
 if (typeof document !== "undefined") require("./FirstPersonPlugin.css");
 
@@ -14,11 +15,19 @@ type FirstPersonClient = {
     isLoggedIn(): boolean;
     addGameMessage(message: string): void;
     closeMenu(): void;
+    getLocalPlayerTile?(): { x: number; y: number } | undefined;
+    walkToLocalTile?(localX: number, localY: number): void;
+    setLocalPlayerFacingLock?(rot: number | undefined): void;
 };
 
 type CursorMode = "none" | "alt" | "menu";
 const MENU_ANCHOR_Y_OFFSET = 12;
 const CONTROLS_HINT = "Press Alt for mouse look. Press Insert to hide arm visibility.";
+const WALK_KEYS = new Set(["KeyW", "KeyA", "KeyS", "KeyD"]);
+// Tiles ahead of the player to aim each WASD walk; re-aimed as the player moves.
+const WALK_LOOKAHEAD_TILES = 4;
+const WALK_RESEND_MS = 150;
+const SCENE_SIZE = 104;
 
 export class FirstPersonPlugin implements ClientPlugin, InputKeyHandler, InputMouseHandler {
     private enabled = false;
@@ -30,6 +39,11 @@ export class FirstPersonPlugin implements ClientPlugin, InputKeyHandler, InputMo
     private restoreRenderSelf?: boolean;
     private restoreFollowPlayerCamera?: boolean;
     private controlsHintShown = false;
+    private readonly walkKeys = new Set<string>();
+    private walking = false;
+    private facingLocked = false;
+    private lastWalkTarget?: { x: number; y: number };
+    private lastWalkSentAt = 0;
 
     constructor(private readonly client: FirstPersonClient) {
         client.inputManager.addKeyHandler(this);
@@ -37,6 +51,10 @@ export class FirstPersonPlugin implements ClientPlugin, InputKeyHandler, InputMo
     }
 
     onKeyDown(event: KeyboardEvent): boolean {
+        if (WALK_KEYS.has(event.code) && this.canWalk()) {
+            this.walkKeys.add(event.code);
+            return true;
+        }
         if (event.code === "Backquote" && !event.repeat) {
             this.setEnabled(!this.enabled);
             return true;
@@ -63,6 +81,10 @@ export class FirstPersonPlugin implements ClientPlugin, InputKeyHandler, InputMo
     }
 
     onKeyUp(event: KeyboardEvent): boolean {
+        if (this.walkKeys.delete(event.code)) {
+            if (this.walkKeys.size === 0) this.stopWalking();
+            return true;
+        }
         return this.enabled && (event.code === "AltLeft" || event.code === "AltRight");
     }
 
@@ -113,6 +135,7 @@ export class FirstPersonPlugin implements ClientPlugin, InputKeyHandler, InputMo
         if (input.isKeyDown("ArrowDown")) camera.setViewPitchOverride((camera.getViewPitchOverride() ?? 0) + deltaPitch);
         if (input.isKeyDown("ArrowRight")) camera.updateYaw(camera.yaw, deltaYaw);
         if (input.isKeyDown("ArrowLeft")) camera.updateYaw(camera.yaw, -deltaYaw);
+        this.updateWalking(camera);
         return true;
     }
 
@@ -191,6 +214,12 @@ export class FirstPersonPlugin implements ClientPlugin, InputKeyHandler, InputMo
     }
 
     private setEnabled(enabled: boolean): void {
+        this.walkKeys.clear();
+        this.stopWalking();
+        if (this.facingLocked) {
+            this.client.setLocalPlayerFacingLock?.(undefined);
+            this.facingLocked = false;
+        }
         this.enabled = enabled;
         this.cursorMode = enabled ? "alt" : "none";
         this.awaitingMenuOpen = false;
@@ -224,6 +253,64 @@ export class FirstPersonPlugin implements ClientPlugin, InputKeyHandler, InputMo
         input.releasePointerLock();
     }
 
+    /** WASD walking is only active while mouse look holds the cursor. */
+    private canWalk(): boolean {
+        return (
+            this.enabled &&
+            this.cursorMode === "none" &&
+            !this.client.menuOpen &&
+            this.client.inputManager.isPointerLock() &&
+            this.client.isLoggedIn()
+        );
+    }
+
+    private updateWalking(camera: Camera): void {
+        // Face the body where the camera looks so WASD strafes/backpedals instead of
+        // turning the player (and the first-person arms) toward each walk direction.
+        const facingLocked = this.canWalk();
+        if (facingLocked || this.facingLocked) {
+            this.client.setLocalPlayerFacingLock?.(facingLocked ? (camera.yaw + 1024) & 2047 : undefined);
+            this.facingLocked = facingLocked;
+        }
+        if (this.walkKeys.size === 0) return;
+        if (!this.canWalk()) {
+            this.walkKeys.clear();
+            this.stopWalking();
+            return;
+        }
+        const forward = (this.walkKeys.has("KeyW") ? 1 : 0) - (this.walkKeys.has("KeyS") ? 1 : 0);
+        const strafe = (this.walkKeys.has("KeyD") ? 1 : 0) - (this.walkKeys.has("KeyA") ? 1 : 0);
+        const tile = this.client.getLocalPlayerTile?.();
+        if ((forward === 0 && strafe === 0) || !tile) return;
+        if (tile.x < 0 || tile.y < 0 || tile.x >= SCENE_SIZE || tile.y >= SCENE_SIZE) return;
+        // Camera forward/right on the ground plane in local tile axes, derived from
+        // the view matrix Camera.update builds (rotateY(yaw) then a 180° roll).
+        const angle = (camera.yaw - 1024) * RS_TO_RADIANS;
+        const dirX = -Math.sin(angle) * forward - Math.cos(angle) * strafe;
+        const dirY = -Math.cos(angle) * forward + Math.sin(angle) * strafe;
+        const scale = WALK_LOOKAHEAD_TILES / Math.hypot(dirX, dirY);
+        const target = {
+            x: Math.max(0, Math.min(SCENE_SIZE - 1, tile.x + Math.round(dirX * scale))),
+            y: Math.max(0, Math.min(SCENE_SIZE - 1, tile.y + Math.round(dirY * scale))),
+        };
+        const now = performance.now();
+        const sameTarget = this.lastWalkTarget?.x === target.x && this.lastWalkTarget.y === target.y;
+        if (sameTarget || now - this.lastWalkSentAt < WALK_RESEND_MS) return;
+        this.client.walkToLocalTile?.(target.x, target.y);
+        this.lastWalkTarget = target;
+        this.lastWalkSentAt = now;
+        this.walking = true;
+    }
+
+    /** Halts on the server's current tile so releasing WASD doesn't finish the lookahead. */
+    private stopWalking(): void {
+        if (!this.walking) return;
+        this.walking = false;
+        this.lastWalkTarget = undefined;
+        const tile = this.client.getLocalPlayerTile?.();
+        if (tile && this.client.isLoggedIn()) this.client.walkToLocalTile?.(tile.x, tile.y);
+    }
+
     private updateLoginSession(): boolean {
         const loggedIn = this.client.isLoggedIn();
         if (!loggedIn) this.controlsHintShown = false;
@@ -231,6 +318,8 @@ export class FirstPersonPlugin implements ClientPlugin, InputKeyHandler, InputMo
     }
 
     private unlockCursor(): void {
+        this.walkKeys.clear();
+        this.stopWalking();
         this.cursorMode = "alt";
         this.client.inputManager.enablePointerLock = false;
         this.client.inputManager.clearInteractionPointerOverride();

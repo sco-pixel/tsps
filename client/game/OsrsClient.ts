@@ -63,6 +63,7 @@ import {
     sendInventoryMove,
     sendInventoryUse,
     sendInventoryUseOn,
+    sendInteractStop,
     sendNpcOption,
     sendPlayerOption,
     sendVarpTransmit,
@@ -187,6 +188,7 @@ import { TextureLoader } from "../rs/texture/TextureLoader";
 import { faceAngleRs } from "../rs/utils/rotation";
 import { getOsrsInterfaceScalingPercent, setOsrsInterfaceScalingPercent } from "../ui/UiScale";
 import {
+    menuAction,
     setHelmSteeringHandler,
     setNpcExamineIdResolver,
     setSpellSelectionClearHandler,
@@ -5587,6 +5589,29 @@ export class OsrsClient {
     /** Adds a client-side system message to the in-game chatbox. */
     addGameMessage(message: string): void {
         chatHistory.addMessage("game", message);
+    }
+
+    /** Local scene tile (0..103) the server last placed the controlled player on. */
+    getLocalPlayerTile(): { x: number; y: number } | undefined {
+        const state = this.playerMovementSync?.getState(this.controlledPlayerServerId | 0);
+        if (!state) return undefined;
+        // Movement state tiles are world coordinates; walk packets take scene-local ones.
+        return {
+            x: ((state.tileX | 0) - (ClientState.baseX | 0)) | 0,
+            y: ((state.tileY | 0) - (ClientState.baseY | 0)) | 0,
+        };
+    }
+
+    /** Pins the controlled player's facing (RS orientation units), or releases it when undefined. */
+    setLocalPlayerFacingLock(rot: number | undefined): void {
+        const idx = this.playerEcs.getIndexForServerId(this.controlledPlayerServerId | 0);
+        this.playerEcs.setFacingLock(rot === undefined ? undefined : idx, rot ?? 0);
+    }
+
+    /** Sends a plain "Walk here" to a local scene tile, as a ground click would. */
+    walkToLocalTile(localX: number, localY: number): void {
+        if (isServerConnected()) sendInteractStop();
+        menuAction(localX | 0, localY | 0, MenuOpcode.WalkHere, 0, -1, "Walk here", "", -1, -1);
     }
 
     /**

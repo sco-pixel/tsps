@@ -52,6 +52,8 @@ export class PlayerEcs {
     private level!: Uint8Array;
     private rotation!: Uint16Array; // 0..2047
     private targetRot!: Uint16Array; // desired orientation from path step
+    private facingLockIndex = -1;
+    private facingLockRot = 0;
     private stall!: Uint8Array; // consecutive ticks without movement toward target
     private rotationCounter!: Uint8Array; // consecutive ticks rotating (for turn anim delay)
     private movementDelayCounter!: Uint8Array; // accumulated movement delay from blocking sequences
@@ -1631,6 +1633,19 @@ export class PlayerEcs {
         this.targetRot[i] = (rot | 0) & 2047;
     }
 
+    /**
+     * Pins one player's facing regardless of movement or face updates (first-person
+     * body follows the camera). Walk anims then resolve to strafe/back as needed.
+     */
+    setFacingLock(i: number | undefined, rot: number = 0): void {
+        this.facingLockIndex = i ?? -1;
+        this.facingLockRot = (rot | 0) & 2047;
+        if (i !== undefined && i >= 0 && i < this.capacity) {
+            this.targetRot[i] = this.facingLockRot;
+            this.rotation[i] = this.facingLockRot;
+        }
+    }
+
     setFaceTileSub(i: number, subX: number, subY: number): void {
         if (!(i >= 0 && i < this.capacity)) return;
         this.faceSubX[i] = subX | 0;
@@ -2393,6 +2408,11 @@ export class PlayerEcs {
                             }
                         }
                         this.clearFaceOverrides(i);
+                    }
+
+                    if (i === this.facingLockIndex) {
+                        this.targetRot[i] = this.facingLockRot;
+                        this.rotation[i] = this.facingLockRot;
                     }
 
                     const orientation = (this.targetRot[i] | 0) & 2047;

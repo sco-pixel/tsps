@@ -51,6 +51,8 @@ try {
     let menuCloseCount = 0;
     let inGame = true;
     const gameMessages: string[] = [];
+    const walks: Array<{ x: number; y: number }> = [];
+    const facings: Array<number | undefined> = [];
     const client = {
         camera: new Camera(0, 0, 0, 256, 512),
         inputManager: input,
@@ -64,6 +66,9 @@ try {
             menuCloseCount++;
             client.menuOpen = false;
         },
+        getLocalPlayerTile: () => ({ x: 50, y: 50 }),
+        walkToLocalTile: (x: number, y: number) => walks.push({ x, y }),
+        setLocalPlayerFacingLock: (rot: number | undefined) => facings.push(rot),
     };
     const plugin = new FirstPersonPlugin(client);
     plugin.onKeyDown({ code: "Backquote", repeat: false } as KeyboardEvent);
@@ -148,6 +153,26 @@ try {
     plugin.onKeyDown({ code: "Backquote", repeat: false } as KeyboardEvent);
     plugin.onKeyDown({ code: "Backquote", repeat: false } as KeyboardEvent);
     assert.equal(gameMessages.length, 2, "a new login session should show the controls hint again");
+
+    assert.equal(
+        plugin.onKeyDown({ code: "KeyW", repeat: false } as KeyboardEvent),
+        false,
+        "WASD should pass through (e.g. to chat) without mouse look",
+    );
+    plugin.onKeyDown({ code: "AltLeft", repeat: false } as KeyboardEvent);
+    assert.equal(input.isPointerLock(), true, "Alt should enable mouse look");
+    client.camera.setYaw(0);
+    assert.equal(plugin.onKeyDown({ code: "KeyW", repeat: false } as KeyboardEvent), true);
+    plugin.handleCameraKeys({ camera: client.camera, input, deltaTime: 0 });
+    assert.deepEqual(walks, [{ x: 50, y: 54 }], "W at yaw 0 should walk north");
+    assert.equal(facings.at(-1), 1024, "mouse look should face the body north with the camera");
+    assert.equal(plugin.onKeyUp({ code: "KeyW" } as KeyboardEvent), true);
+    assert.deepEqual(walks[1], { x: 50, y: 50 }, "releasing WASD should stop on the current tile");
+    plugin.onKeyDown({ code: "KeyD", repeat: false } as KeyboardEvent);
+    plugin.onKeyDown({ code: "AltLeft", repeat: false } as KeyboardEvent);
+    plugin.handleCameraKeys({ camera: client.camera, input, deltaTime: 0 });
+    assert.equal(walks.length, 2, "leaving mouse look should drop held WASD keys");
+    assert.equal(facings.at(-1), undefined, "leaving mouse look should release the body facing");
 } finally {
     Object.defineProperty(globalThis, "document", {
         configurable: true,
